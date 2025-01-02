@@ -573,6 +573,17 @@ if get_option('certdb')
   )
 endif
 
+executable(
+  'notify-daemon',
+  'NotifyDaemon.cxx',
+  include_directories: inc,
+  dependencies: [
+    pg_dep,
+    event_dep,
+    pool_dep,
+  ],
+)
+
 subdir('acme')
 subdir('http')
 subdir('istream')
