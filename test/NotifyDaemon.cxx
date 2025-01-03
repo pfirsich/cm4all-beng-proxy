@@ -44,21 +44,18 @@ struct NotifyDaemon
 	  , datacenter_id(std::move(datacenter_id_))
 	  , control_client(control_server)
 	{
-		// PInstance
 #ifndef NDEBUG
 		event_loop.SetPostCallback(BIND_FUNCTION(pool_commit));
 #endif
-		// TestInstance
-		direct_global_init();
-		fb_pool_init();
+		fb_pool_init(); // TestInstance had this, not sure if I will actually need it
 
 		conn.Connect();
 	}
 
 	~NotifyDaemon()
 	{
-		fb_pool_deinit(); // TestInstance
-		pool_commit();	  // AutoPoolCommit
+		fb_pool_deinit();
+		pool_commit();
 	}
 
 	static std::pair<BengControl::Command, std::string> GetControlMessage(const Event &)
