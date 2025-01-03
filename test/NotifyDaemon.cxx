@@ -1,14 +1,21 @@
 #include <queue>
 
+#include <sys/socket.h>
+
 #include <fmt/core.h>
 
 #include <event/Loop.hxx>
 #include <io/SpliceSupport.hxx>
 #include <memory/fb_pool.hxx>
-#include <net/control/Client.hxx>
+#include <net/RConnectSocket.hxx>
+#include <net/SocketError.hxx>
+#include <net/UniqueSocketDescriptor.hxx>
+#include <net/control/Padding.hxx>
+#include <net/control/Protocol.hxx>
 #include <pg/AsyncConnection.hxx>
 #include <pool/RootPool.hxx>
 #include <pool/pool.hxx>
+#include <util/ByteOrder.hxx>
 #include <util/PrintException.hxx>
 
 struct NotifyDaemon
@@ -36,13 +43,18 @@ struct NotifyDaemon
 	std::queue<Event> event_queue;
 	bool notified = false;
 	bool initial_flush = true;
-	BengControl::Client control_client;
+	// I can't really use BengControl::Client, because I need MSG_DONTWAIT and I need to handle EAGAIN and I can't
+	// add this to BengControl::Client in a clean, backwards compatible way.
+	UniqueSocketDescriptor control_socket;
+	SocketEvent socket_event;
+	std::queue<long> delete_events;
 
 	NotifyDaemon(std::string datacenter_id_, const char *conninfo, const char *schema_, const char *control_server)
 	  : conn(event_loop, conninfo, schema_, *this)
 	  , schema(schema_)
 	  , datacenter_id(std::move(datacenter_id_))
-	  , control_client(control_server)
+	  , control_socket(ResolveConnectDatagramSocket(control_server, BengControl::DEFAULT_PORT))
+	  , socket_event(event_loop, BIND_THIS_METHOD(ControlSocketWritable), control_socket)
 	{
 #ifndef NDEBUG
 		event_loop.SetPostCallback(BIND_FUNCTION(pool_commit));
@@ -62,6 +74,54 @@ struct NotifyDaemon
 	{
 		// TODO: Proper mapping
 		return { BengControl::Command::TCACHE_INVALIDATE, "" };
+	}
+
+	void SendControlMessages() noexcept
+	{
+		while (!event_queue.empty()) {
+			const auto &event = event_queue.front();
+			fmt::print("> notify: {}, {}\n", event.id, event.event);
+			auto [cmd, payload] = GetControlMessage(event);
+
+			uint32_t magic = ToBE32(BengControl::MAGIC);
+			BengControl::Header header{ ToBE16(payload.size()), ToBE16(uint16_t(cmd)) };
+			static uint8_t padding[3] = { 0, 0, 0 };
+
+			struct iovec iov[] = {
+				{ &magic, sizeof(magic) },
+				{ &header, sizeof(header) },
+				{ payload.data(), payload.size() },
+				{ padding, BengControl::PaddingSize(payload.size()) },
+			};
+			msghdr msg{ nullptr, 0, iov, 4, nullptr, 0, 0 };
+
+			const auto res = control_socket.Send(msg, MSG_DONTWAIT);
+			if (res < 0) {
+				if (errno == ENETUNREACH) {
+					// TODO: see libcommon/src/net/control/Client.cxx
+					fmt::print("sendmsg failed: ENETUNREACH\n");
+				} else if (errno == EAGAIN) {
+					// Just try again when the socket becomes writable again
+					break;
+				} else {
+					// TODO. I think there is nothing we can do in the general case.
+					fmt::print("sendmsg failed: {}\n", errno);
+					std::exit(1);
+				}
+			}
+
+			assert(res > 0);
+			delete_events.push(event.id);
+			SendNextQuery();
+			event_queue.pop();
+		}
+	}
+
+	void ControlSocketWritable(unsigned events) noexcept
+	{
+		if (events & SocketEvent::WRITE) {
+			SendControlMessages();
+		}
 	}
 
 	void Listen()
@@ -101,27 +161,15 @@ struct NotifyDaemon
 		conn.SendQuery(*this, sql, event_id);
 	}
 
-	void Notify(const Event &event)
-	{
-		fmt::print("> notify: {}, {}\n", event.id, event.event);
-
-		const auto [cmd, payload] = GetControlMessage(event);
-		// TODO: Make this async
-		control_client.Send(cmd, payload);
-		fmt::print("sendmsg done\n");
-
-		DeleteEvent(event.id);
-	}
-
-	void Query()
+	void SendNextQuery()
 	{
 		if (current_query != CurrentQuery::None) {
 			return;
 		}
-		if (!event_queue.empty()) {
-			const auto event = event_queue.front();
-			event_queue.pop();
-			Notify(event);
+		if (!delete_events.empty()) {
+			const auto id = delete_events.front();
+			delete_events.pop();
+			DeleteEvent(id);
 		} else if (notified || initial_flush) {
 			ProcessEvent();
 		}
@@ -144,7 +192,7 @@ struct NotifyDaemon
 		// because we might already be processing another query in which case we must not call SendQuery again.
 		fmt::print("notify: {}\n", name);
 		notified = true;
-		Query();
+		SendNextQuery();
 	}
 
 	void OnError(std::exception_ptr e) noexcept override // AsyncConnectionHandler
@@ -165,6 +213,7 @@ struct NotifyDaemon
 				// done (OnResultEnd was called) and we must not call SendQuery before the current Query
 				// is finished.
 				event_queue.emplace(Event{ event_id, std::string(event), std::string(params) });
+				SendControlMessages();
 			} else {
 				fmt::print("Updated 0 rows\n");
 				initial_flush = false;
@@ -182,7 +231,7 @@ struct NotifyDaemon
 			fmt::print("Completed event\n");
 		}
 		current_query = CurrentQuery::None;
-		Query();
+		SendNextQuery();
 	}
 };
 
