@@ -36,25 +36,31 @@ struct NotifyDaemon
 
 	EventLoop event_loop;
 	RootPool root_pool;
+
 	Pg::AsyncConnection db;
 	std::string schema;
 	std::string datacenter_id;
 	CurrentQuery current_query = {};
-	std::queue<Event> event_queue;
-	bool notified = false;
-	bool initial_flush = true;
+
 	// I can't really use BengControl::Client, because I need MSG_DONTWAIT and I need to handle EAGAIN and I can't
 	// add this to BengControl::Client in a clean, backwards compatible way.
 	UniqueSocketDescriptor control_socket;
-	SocketEvent socket_event;
-	std::queue<long> delete_events;
+	SocketEvent control_socket_event;
 
-	NotifyDaemon(std::string datacenter_id_, const char *conninfo, const char *schema_, const char *control_server)
+	std::queue<Event> event_queue;
+	std::queue<long> delete_events;
+	bool notified = false;
+	bool initial_flush = true;
+
+	NotifyDaemon(std::string datacenter_id_,
+		     const char *conninfo,
+		     const char *schema_,
+		     const char *control_server) noexcept
 	  : db(event_loop, conninfo, schema_, *this)
 	  , schema(schema_)
 	  , datacenter_id(std::move(datacenter_id_))
 	  , control_socket(ResolveConnectDatagramSocket(control_server, BengControl::DEFAULT_PORT))
-	  , socket_event(event_loop, BIND_THIS_METHOD(ControlSocketWritable), control_socket)
+	  , control_socket_event(event_loop, BIND_THIS_METHOD(ControlSocketWritable), control_socket)
 	{
 #ifndef NDEBUG
 		event_loop.SetPostCallback(BIND_FUNCTION(pool_commit));
