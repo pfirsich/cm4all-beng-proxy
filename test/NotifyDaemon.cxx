@@ -75,7 +75,7 @@ struct NotifyDaemon
 		processed_at = NOW()
 		WHERE id = (
 			SELECT id FROM events
-			WHERE processed_at IS NULL AND datacenter_id = $1
+			WHERE datacenter_id = $1 AND (processed_at IS NULL OR NOW() - processed_at >= INTERVAL '5 min')
 			FOR UPDATE SKIP LOCKED
 			LIMIT 1
 		)
