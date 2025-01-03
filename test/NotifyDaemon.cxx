@@ -140,12 +140,18 @@ struct NotifyDaemon
 	{
 		fmt::print("result status: {}\n", result.GetStatus());
 		if (current_query == CurrentQuery::ProcessEvent) {
-			const auto event_id = result.GetLongValue(0, 0);
-			const auto event = result.GetValueView(0, 1);
-			const auto params = result.GetValueView(0, 2);
-			// We can't just do the notification here, because it might finish before this query is done
-			// (OnResultEnd was called) and we must not call SendQuery before the current Query is finished.
-			event_queue.emplace(Event{ event_id, std::string(event), std::string(params) });
+			// We might be contending for the events with other daemons, so we might just "miss"
+			if (result.GetAffectedRows()) {
+				const auto event_id = result.GetLongValue(0, 0);
+				const auto event = result.GetValueView(0, 1);
+				const auto params = result.GetValueView(0, 2);
+				// We can't just do the notification here, because it might finish before this query is
+				// done (OnResultEnd was called) and we must not call SendQuery before the current Query
+				// is finished.
+				event_queue.emplace(Event{ event_id, std::string(event), std::string(params) });
+			} else {
+				fmt::print("Updated 0 rows\n");
+			}
 		}
 	}
 
