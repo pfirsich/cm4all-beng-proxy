@@ -34,6 +34,7 @@ struct NotifyDaemon
 	CurrentQuery current_query = {};
 	std::queue<Event> event_queue;
 	bool notified = false;
+	bool initial_flush = true;
 
 	NotifyDaemon(const char *conninfo, const char *schema_, std::string datacenter_id_)
 	  : conn(event_loop, conninfo, schema_, *this)
@@ -106,7 +107,7 @@ struct NotifyDaemon
 			const auto event = event_queue.front();
 			event_queue.pop();
 			Notify(event);
-		} else if (notified) {
+		} else if (notified || initial_flush) {
 			ProcessEvent();
 		}
 	}
@@ -151,6 +152,7 @@ struct NotifyDaemon
 				event_queue.emplace(Event{ event_id, std::string(event), std::string(params) });
 			} else {
 				fmt::print("Updated 0 rows\n");
+				initial_flush = false;
 			}
 		}
 	}
