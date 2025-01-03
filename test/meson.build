@@ -581,6 +581,7 @@ executable(
     pg_dep,
     event_dep,
     pool_dep,
+    control_client_dep,
   ],
 )
 

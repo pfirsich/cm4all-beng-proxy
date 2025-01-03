@@ -5,6 +5,7 @@
 #include <event/Loop.hxx>
 #include <io/SpliceSupport.hxx>
 #include <memory/fb_pool.hxx>
+#include <net/control/Client.hxx>
 #include <pg/AsyncConnection.hxx>
 #include <pool/RootPool.hxx>
 #include <pool/pool.hxx>
@@ -35,11 +36,13 @@ struct NotifyDaemon
 	std::queue<Event> event_queue;
 	bool notified = false;
 	bool initial_flush = true;
+	BengControl::Client control_client;
 
-	NotifyDaemon(const char *conninfo, const char *schema_, std::string datacenter_id_)
+	NotifyDaemon(std::string datacenter_id_, const char *conninfo, const char *schema_, const char *control_server)
 	  : conn(event_loop, conninfo, schema_, *this)
 	  , schema(schema_)
 	  , datacenter_id(std::move(datacenter_id_))
+	  , control_client(control_server)
 	{
 		// PInstance
 #ifndef NDEBUG
@@ -48,12 +51,20 @@ struct NotifyDaemon
 		// TestInstance
 		direct_global_init();
 		fb_pool_init();
+
+		conn.Connect();
 	}
 
 	~NotifyDaemon()
 	{
 		fb_pool_deinit(); // TestInstance
 		pool_commit();	  // AutoPoolCommit
+	}
+
+	static std::pair<BengControl::Command, std::string> GetControlMessage(const Event &)
+	{
+		// TODO: Proper mapping
+		return { BengControl::Command::TCACHE_INVALIDATE, "" };
 	}
 
 	void Listen()
@@ -86,16 +97,23 @@ struct NotifyDaemon
 		conn.SendQuery(*this, sql, datacenter_id);
 	}
 
-	void Notify(const Event &event)
+	void DeleteEvent(long event_id)
 	{
-		fmt::print("notify: {}, {}\n", event.id, event.event);
-
-		// TODO: Actually send a notification
-
-		// Now completed, remove the event (alternatively set completed_at)
 		const auto sql = "DELETE FROM events WHERE id = $1";
 		current_query = CurrentQuery::DeleteEvent;
-		conn.SendQuery(*this, sql, event.id);
+		conn.SendQuery(*this, sql, event_id);
+	}
+
+	void Notify(const Event &event)
+	{
+		fmt::print("> notify: {}, {}\n", event.id, event.event);
+
+		const auto [cmd, payload] = GetControlMessage(event);
+		// TODO: Make this async
+		control_client.Send(cmd, payload);
+		fmt::print("sendmsg done\n");
+
+		DeleteEvent(event.id);
 	}
 
 	void Query()
@@ -175,14 +193,14 @@ int
 main(int argc, char **argv)
 {
 	try {
-		if (argc != 3) {
-			fmt::print(stderr, "Usage: {} CONNINFO DATACENTER\n", argv[0]);
+		if (argc != 4) {
+			fmt::print(stderr, "Usage: {} DATACENTERID PGCONNINFO CONTROLSERVER\n", argv[0]);
 			return EXIT_FAILURE;
 		}
-		const auto conninfo = argv[1];
-		const auto datacenter_id = argv[2];
-		NotifyDaemon instance(conninfo, "", datacenter_id);
-		instance.conn.Connect();
+		const auto datacenter_id = argv[1];
+		const auto conninfo = argv[2];
+		const auto control_server = argv[3];
+		NotifyDaemon instance(datacenter_id, conninfo, "", control_server);
 		instance.event_loop.Run();
 		return EXIT_SUCCESS;
 	} catch (...) {
