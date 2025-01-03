@@ -36,7 +36,7 @@ struct NotifyDaemon
 
 	EventLoop event_loop;
 	RootPool root_pool;
-	Pg::AsyncConnection conn;
+	Pg::AsyncConnection db;
 	std::string schema;
 	std::string datacenter_id;
 	CurrentQuery current_query = {};
@@ -50,7 +50,7 @@ struct NotifyDaemon
 	std::queue<long> delete_events;
 
 	NotifyDaemon(std::string datacenter_id_, const char *conninfo, const char *schema_, const char *control_server)
-	  : conn(event_loop, conninfo, schema_, *this)
+	  : db(event_loop, conninfo, schema_, *this)
 	  , schema(schema_)
 	  , datacenter_id(std::move(datacenter_id_))
 	  , control_socket(ResolveConnectDatagramSocket(control_server, BengControl::DEFAULT_PORT))
@@ -61,7 +61,7 @@ struct NotifyDaemon
 #endif
 		fb_pool_init(); // TestInstance had this, not sure if I will actually need it
 
-		conn.Connect();
+		db.Connect();
 	}
 
 	~NotifyDaemon()
@@ -133,7 +133,7 @@ struct NotifyDaemon
 		}
 		sql += "events_posted\"";
 		current_query = CurrentQuery::Listen;
-		conn.SendQuery(*this, sql.c_str());
+		db.SendQuery(*this, sql.c_str());
 	}
 
 	void ProcessEvent()
@@ -151,14 +151,14 @@ struct NotifyDaemon
 		RETURNING id, event, params;
 		)";
 		current_query = CurrentQuery::ProcessEvent;
-		conn.SendQuery(*this, sql, datacenter_id);
+		db.SendQuery(*this, sql, datacenter_id);
 	}
 
 	void DeleteEvent(long event_id)
 	{
 		const auto sql = "DELETE FROM events WHERE id = $1";
 		current_query = CurrentQuery::DeleteEvent;
-		conn.SendQuery(*this, sql, event_id);
+		db.SendQuery(*this, sql, event_id);
 	}
 
 	void SendNextQuery()
