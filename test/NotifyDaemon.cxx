@@ -68,6 +68,8 @@ struct NotifyDaemon
 		fb_pool_init(); // TestInstance had this, not sure if I will actually need it
 
 		db.Connect();
+
+		control_socket_event.Schedule(EpollEvents::WRITE);
 	}
 
 	~NotifyDaemon()
