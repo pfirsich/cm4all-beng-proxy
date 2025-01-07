@@ -196,8 +196,6 @@ struct NotifyDaemon
 
 	void OnNotify(const char *name) override // AsyncConnectionHandler
 	{
-		// TODO: Put this event in a queue or something, because we shouldn't be calling ProcessEvent here,
-		// because we might already be processing another query in which case we must not call SendQuery again.
 		fmt::print("notify: {}\n", name);
 		notified = true;
 		SendNextQuery();
