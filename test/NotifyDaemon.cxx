@@ -208,7 +208,7 @@ struct NotifyDaemon
 
 	void OnResult(Pg::Result &&result) override // AsyncResultHandler
 	{
-		fmt::print("result status: {}\n", result.GetStatus());
+		fmt::print("result status: {}\n", fmt::underlying(result.GetStatus()));
 		if (current_query == CurrentQuery::ProcessEvent) {
 			// We might be contending for the events with other daemons, so we might just "miss"
 			if (result.GetAffectedRows()) {
