@@ -1,22 +1,11 @@
 #include "event/Loop.hxx"
-#include "io/SpliceSupport.hxx"
-#include "memory/fb_pool.hxx"
-#include "net/RConnectSocket.hxx"
-#include "net/SocketError.hxx"
-#include "net/UniqueSocketDescriptor.hxx"
-#include "net/control/Padding.hxx"
-#include "net/control/Protocol.hxx"
+#include "net/control/Client.hxx"
 #include "pg/AsyncConnection.hxx"
-#include "pool/RootPool.hxx"
-#include "pool/pool.hxx"
-#include "util/ByteOrder.hxx"
 #include "util/PrintException.hxx"
 
 #include <fmt/core.h>
 
 #include <queue>
-
-#include <sys/socket.h>
 
 struct NotifyDaemon
   : Pg::AsyncConnectionHandler
@@ -28,26 +17,15 @@ struct NotifyDaemon
 		DeleteEvent,
 	};
 
-	struct Event {
-		long id;
-		std::string event;
-		std::string params;
-	};
-
 	EventLoop event_loop;
-	RootPool root_pool;
 
 	Pg::AsyncConnection db;
 	std::string schema;
 	std::string datacenter_id;
 	CurrentQuery current_query = {};
 
-	// I can't really use BengControl::Client, because I need MSG_DONTWAIT and I need to handle EAGAIN and I can't
-	// add this to BengControl::Client in a clean, backwards compatible way.
-	UniqueSocketDescriptor control_socket;
-	SocketEvent control_socket_event;
+	BengControl::Client control_client;
 
-	std::queue<Event> event_queue;
 	std::queue<long> delete_events;
 	bool notified = false;
 	bool initial_flush = true;
@@ -59,65 +37,23 @@ struct NotifyDaemon
 	  : db(event_loop, conninfo, schema_, *this)
 	  , schema(schema_)
 	  , datacenter_id(std::move(datacenter_id_))
-	  , control_socket(ResolveConnectDatagramSocket(control_server, BengControl::DEFAULT_PORT))
-	  , control_socket_event(event_loop, BIND_THIS_METHOD(ControlSocketWritable), control_socket)
+	  , control_client(control_server)
 	{
 		db.Connect();
-		control_socket_event.Schedule(EpollEvents::WRITE);
 	}
 
-	static std::pair<BengControl::Command, std::string> GetControlMessage(const Event &)
+	static std::pair<BengControl::Command, std::string> GetControlMessage(std::string_view /*events*/,
+									      std::string_view /*params*/)
 	{
 		// TODO: Proper mapping
 		return { BengControl::Command::TCACHE_INVALIDATE, "" };
 	}
 
-	void SendControlMessages() noexcept
+	void SendControlMessage(long event_id, std::string_view event, std::string_view params)
 	{
-		while (!event_queue.empty()) {
-			const auto &event = event_queue.front();
-			fmt::print("> notify: {}, {}\n", event.id, event.event);
-			auto [cmd, payload] = GetControlMessage(event);
-
-			uint32_t magic = ToBE32(BengControl::MAGIC);
-			BengControl::Header header{ ToBE16(payload.size()), ToBE16(uint16_t(cmd)) };
-			static uint8_t padding[3] = { 0, 0, 0 };
-
-			struct iovec iov[] = {
-				{ &magic, sizeof(magic) },
-				{ &header, sizeof(header) },
-				{ payload.data(), payload.size() },
-				{ padding, BengControl::PaddingSize(payload.size()) },
-			};
-			msghdr msg{ nullptr, 0, iov, 4, nullptr, 0, 0 };
-
-			const auto res = control_socket.Send(msg, MSG_DONTWAIT);
-			if (res < 0) {
-				if (errno == ENETUNREACH) {
-					// TODO: see libcommon/src/net/control/Client.cxx
-					fmt::print("sendmsg failed: ENETUNREACH\n");
-				} else if (errno == EAGAIN) {
-					// Just try again when the socket becomes writable again
-					break;
-				} else {
-					// TODO. I think there is nothing we can do in the general case.
-					fmt::print("sendmsg failed: {}\n", errno);
-					std::exit(1);
-				}
-			}
-
-			assert(res > 0);
-			delete_events.push(event.id);
-			SendNextQuery();
-			event_queue.pop();
-		}
-	}
-
-	void ControlSocketWritable(unsigned events) noexcept
-	{
-		if (events & SocketEvent::WRITE) {
-			SendControlMessages();
-		}
+		auto [command, payload] = GetControlMessage(event, params);
+		control_client.Send(command, payload);
+		delete_events.push(event_id);
 	}
 
 	void Listen()
@@ -206,11 +142,7 @@ struct NotifyDaemon
 				const auto event_id = result.GetLongValue(0, 0);
 				const auto event = result.GetValueView(0, 1);
 				const auto params = result.GetValueView(0, 2);
-				// We can't just do the notification here, because it might finish before this query is
-				// done (OnResultEnd was called) and we must not call SendQuery before the current Query
-				// is finished.
-				event_queue.emplace(Event{ event_id, std::string(event), std::string(params) });
-				SendControlMessages();
+				SendControlMessage(event_id, event, params);
 			} else {
 				fmt::print("Updated 0 rows\n");
 				initial_flush = false;
