@@ -1,22 +1,22 @@
-#include <queue>
-
-#include <sys/socket.h>
+#include "event/Loop.hxx"
+#include "io/SpliceSupport.hxx"
+#include "memory/fb_pool.hxx"
+#include "net/RConnectSocket.hxx"
+#include "net/SocketError.hxx"
+#include "net/UniqueSocketDescriptor.hxx"
+#include "net/control/Padding.hxx"
+#include "net/control/Protocol.hxx"
+#include "pg/AsyncConnection.hxx"
+#include "pool/RootPool.hxx"
+#include "pool/pool.hxx"
+#include "util/ByteOrder.hxx"
+#include "util/PrintException.hxx"
 
 #include <fmt/core.h>
 
-#include <event/Loop.hxx>
-#include <io/SpliceSupport.hxx>
-#include <memory/fb_pool.hxx>
-#include <net/RConnectSocket.hxx>
-#include <net/SocketError.hxx>
-#include <net/UniqueSocketDescriptor.hxx>
-#include <net/control/Padding.hxx>
-#include <net/control/Protocol.hxx>
-#include <pg/AsyncConnection.hxx>
-#include <pool/RootPool.hxx>
-#include <pool/pool.hxx>
-#include <util/ByteOrder.hxx>
-#include <util/PrintException.hxx>
+#include <queue>
+
+#include <sys/socket.h>
 
 struct NotifyDaemon
   : Pg::AsyncConnectionHandler
