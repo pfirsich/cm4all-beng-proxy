@@ -62,20 +62,8 @@ struct NotifyDaemon
 	  , control_socket(ResolveConnectDatagramSocket(control_server, BengControl::DEFAULT_PORT))
 	  , control_socket_event(event_loop, BIND_THIS_METHOD(ControlSocketWritable), control_socket)
 	{
-#ifndef NDEBUG
-		event_loop.SetPostCallback(BIND_FUNCTION(pool_commit));
-#endif
-		fb_pool_init(); // TestInstance had this, not sure if I will actually need it
-
 		db.Connect();
-
 		control_socket_event.Schedule(EpollEvents::WRITE);
-	}
-
-	~NotifyDaemon()
-	{
-		fb_pool_deinit();
-		pool_commit();
 	}
 
 	static std::pair<BengControl::Command, std::string> GetControlMessage(const Event &)
