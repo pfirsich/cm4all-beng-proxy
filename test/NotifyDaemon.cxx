@@ -14,68 +14,82 @@ GetControlMessage(std::string_view /*events*/, std::string_view /*params*/)
 	return { BengControl::Command::TCACHE_INVALIDATE, "" };
 }
 
-class NotifyDaemon
-  : Pg::AsyncConnectionHandler
-  , Pg::AsyncResultHandler {
-	enum class CurrentQuery {
-		None = 0,
-		Listen,
-		ProcessEvent,
-		DeleteEvent,
-	};
-
-	EventLoop event_loop;
-
-	Pg::AsyncConnection db;
+class NotifyDaemon {
+	Pg::Connection db;
 	std::string schema;
 	std::string datacenter_id;
-	CurrentQuery current_query = {};
 
 	BengControl::Client control_client;
 
-	std::queue<long> delete_events;
-	bool notified = false;
-	bool initial_flush = true;
-
 public:
-	NotifyDaemon(std::string datacenter_id_,
+	NotifyDaemon(const char *datacenter_id_,
 		     const char *conninfo,
 		     const char *schema_,
 		     const char *control_server) noexcept
-	  : db(event_loop, conninfo, schema_, *this)
+	  : db(conninfo)
 	  , schema(schema_)
-	  , datacenter_id(std::move(datacenter_id_))
+	  , datacenter_id(datacenter_id_)
 	  , control_client(control_server)
 	{
-		db.Connect();
 	}
 
-	void Run() { event_loop.Run(); }
+	[[noreturn]] void Run();
 
 private:
-	void SendControlMessage(long event_id, std::string_view event, std::string_view params)
-	{
-		auto [command, payload] = GetControlMessage(event, params);
-		control_client.Send(command, payload);
-		delete_events.push(event_id);
-	}
+	void Listen();
+	void WaitForNotify();
+	std::tuple<long, std::string_view, std::string_view> GetEvent();
+	void DeleteEvent(long event_id);
+	bool ProcessEvent();
+	void ProcessEvents();
+};
 
-	void Listen()
-	{
-		std::string sql("LISTEN \"");
-		if (!schema.empty() && schema != "public") {
-			sql += schema;
-			sql += ':';
+[[noreturn]] void
+NotifyDaemon::Run()
+{
+	Listen();
+	ProcessEvents(); // Process all events after startup
+
+	while (true) {
+		try {
+			WaitForNotify();
+			ProcessEvents();
+		} catch (const std::exception &exc) {
+			fmt::print(stderr, "Exception: {}\n", exc.what());
 		}
-		sql += "events_posted\"";
-		current_query = CurrentQuery::Listen;
-		db.SendQuery(*this, sql.c_str());
 	}
+}
 
-	void ProcessEvent()
-	{
-		notified = false;
-		const auto sql = R"(
+void
+NotifyDaemon::Listen()
+{
+	std::string sql("LISTEN \"");
+	if (!schema.empty() && schema != "public") {
+		sql += schema;
+		sql += ':';
+	}
+	sql += "events_posted\"";
+	db.ExecuteParams(sql.c_str());
+}
+
+void
+NotifyDaemon::WaitForNotify()
+{
+	fmt::print("wait for notify\n");
+	while (FileDescriptor(db.GetSocket()).WaitReadable(1000) == 0) {}
+
+	Pg::Notify notify;
+	do {
+		db.ConsumeInput();
+		notify = db.GetNextNotify();
+	} while (notify);
+}
+
+std::tuple<long, std::string_view, std::string_view>
+NotifyDaemon::GetEvent()
+{
+	fmt::print("get event\n");
+	const auto sql = R"(
 		UPDATE events SET
 		processed_at = NOW()
 		WHERE id = (
@@ -86,87 +100,57 @@ private:
 		)
 		RETURNING id, event, params;
 		)";
-		current_query = CurrentQuery::ProcessEvent;
-		db.SendQuery(*this, sql, datacenter_id);
+	const auto res = db.ExecuteParams(sql, datacenter_id);
+
+	if (!res.IsQuerySuccessful()) {
+		throw std::runtime_error("Error processing event");
 	}
 
-	void DeleteEvent(long event_id)
-	{
-		const auto sql = "DELETE FROM events WHERE id = $1";
-		current_query = CurrentQuery::DeleteEvent;
-		db.SendQuery(*this, sql, event_id);
+	// We might be contending for the events with other daemons, so we might just "miss"
+	if (res.GetAffectedRows() == 0) {
+		return { 0, "", "" };
 	}
 
-	void SendNextQuery()
-	{
-		if (current_query != CurrentQuery::None) {
-			return;
-		}
-		if (!delete_events.empty()) {
-			const auto id = delete_events.front();
-			delete_events.pop();
-			DeleteEvent(id);
-		} else if (notified || initial_flush) {
-			ProcessEvent();
-		}
+	const auto event_id = res.GetLongValue(0, 0);
+	const auto event = res.GetValueView(0, 1);
+	const auto params = res.GetValueView(0, 2);
+	return { event_id, event, params };
+}
+
+void
+NotifyDaemon::DeleteEvent(long event_id)
+{
+	fmt::print("delete\n");
+	const auto sql = "DELETE FROM events WHERE id = $1";
+	const auto res = db.ExecuteParams(sql, event_id);
+
+	if (!res.IsCommandSuccessful()) {
+		throw std::runtime_error("Error deleting event");
+	}
+}
+
+bool
+NotifyDaemon::ProcessEvent()
+{
+	const auto [event_id, event, params] = GetEvent();
+	if (event_id == 0 && event.empty()) {
+		return false;
 	}
 
-	void OnConnect() override // AsyncConnectionHandler
-	{
-		fmt::print("connected\n");
-		Listen();
-	}
+	fmt::print("event: {}, {}, {}\n", event_id, event, params);
+	auto [command, payload] = GetControlMessage(event, params);
+	control_client.Send(command, payload);
 
-	void OnDisconnect() noexcept override // AsyncConnectionHandler
-	{
-		fmt::print("disconnected\n");
-	}
+	DeleteEvent(event_id);
 
-	void OnNotify(const char *name) override // AsyncConnectionHandler
-	{
-		fmt::print("notify: {}\n", name);
-		notified = true;
-		SendNextQuery();
-	}
+	return true;
+}
 
-	void OnError(std::exception_ptr e) noexcept override // AsyncConnectionHandler
-	{
-		PrintException(e);
-	}
-
-	void OnResult(Pg::Result &&result) override // AsyncResultHandler
-	{
-		fmt::print("result status: {}\n", fmt::underlying(result.GetStatus()));
-		if (!result.IsCommandSuccessful() && !result.IsQuerySuccessful()) {
-			return;
-		}
-		if (current_query == CurrentQuery::ProcessEvent) {
-			// We might be contending for the events with other daemons, so we might just "miss"
-			if (result.GetAffectedRows()) {
-				const auto event_id = result.GetLongValue(0, 0);
-				const auto event = result.GetValueView(0, 1);
-				const auto params = result.GetValueView(0, 2);
-				SendControlMessage(event_id, event, params);
-			} else {
-				fmt::print("Updated 0 rows\n");
-				initial_flush = false;
-			}
-		}
-	}
-
-	void OnResultEnd() override // AsyncResultHandler
-	{
-		if (current_query == CurrentQuery::Listen) {
-			fmt::print("Started listening\n");
-		} else if (current_query == CurrentQuery::ProcessEvent) {
-			fmt::print("Processed event\n");
-		} else if (current_query == CurrentQuery::DeleteEvent) {
-			fmt::print("Completed event\n");
-		}
-		current_query = CurrentQuery::None;
-		SendNextQuery();
-	}
-};
+void
+NotifyDaemon::ProcessEvents()
+{
+	while (ProcessEvent()) {}
+}
 
 int
 main(int argc, char **argv)
