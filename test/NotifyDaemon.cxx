@@ -49,6 +49,7 @@ struct NotifyDaemon
 		db.Connect();
 	}
 
+	void Run() { event_loop.Run(); }
 
 	void SendControlMessage(long event_id, std::string_view event, std::string_view params)
 	{
@@ -177,7 +178,7 @@ main(int argc, char **argv)
 		const auto conninfo = argv[2];
 		const auto control_server = argv[3];
 		NotifyDaemon instance(datacenter_id, conninfo, "", control_server);
-		instance.event_loop.Run();
+		instance.Run();
 		return EXIT_SUCCESS;
 	} catch (...) {
 		PrintException(std::current_exception());
