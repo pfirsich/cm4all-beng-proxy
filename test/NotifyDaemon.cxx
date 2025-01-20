@@ -14,7 +14,7 @@ GetControlMessage(std::string_view /*events*/, std::string_view /*params*/)
 	return { BengControl::Command::TCACHE_INVALIDATE, "" };
 }
 
-struct NotifyDaemon
+class NotifyDaemon
   : Pg::AsyncConnectionHandler
   , Pg::AsyncResultHandler {
 	enum class CurrentQuery {
@@ -37,6 +37,7 @@ struct NotifyDaemon
 	bool notified = false;
 	bool initial_flush = true;
 
+public:
 	NotifyDaemon(std::string datacenter_id_,
 		     const char *conninfo,
 		     const char *schema_,
@@ -51,6 +52,7 @@ struct NotifyDaemon
 
 	void Run() { event_loop.Run(); }
 
+private:
 	void SendControlMessage(long event_id, std::string_view event, std::string_view params)
 	{
 		auto [command, payload] = GetControlMessage(event, params);
