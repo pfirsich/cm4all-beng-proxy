@@ -7,6 +7,13 @@
 
 #include <queue>
 
+static std::pair<BengControl::Command, std::string>
+GetControlMessage(std::string_view /*events*/, std::string_view /*params*/)
+{
+	// TODO: Proper mapping
+	return { BengControl::Command::TCACHE_INVALIDATE, "" };
+}
+
 struct NotifyDaemon
   : Pg::AsyncConnectionHandler
   , Pg::AsyncResultHandler {
@@ -42,12 +49,6 @@ struct NotifyDaemon
 		db.Connect();
 	}
 
-	static std::pair<BengControl::Command, std::string> GetControlMessage(std::string_view /*events*/,
-									      std::string_view /*params*/)
-	{
-		// TODO: Proper mapping
-		return { BengControl::Command::TCACHE_INVALIDATE, "" };
-	}
 
 	void SendControlMessage(long event_id, std::string_view event, std::string_view params)
 	{
